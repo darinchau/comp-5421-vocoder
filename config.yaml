@@ -1,0 +1,47 @@
+# Config file for autoencoder training
+############## Dataset Configuration ##############
+dataset_dirs: [
+  "E:/audio-dataset-v3/audio",
+  "./fma_small_mp3"
+]                                     # List of directories containing the audio dataset
+output_dir: "E:/output"               # Directory to save the trained models and checkpoints
+num_workers_dl: 2                     # Number of workers for data loading
+batch_size: 1                         # Batch size for autoencoder training
+ds_batch_size: 3                      # Batch size for dataset loading
+
+############### Model Configuration ##############
+sample_rate: 44100                    # Sample rate of the audio
+ntimeframes: 432                      # Number of time frames in the spectrogram
+nfft: 1025                            # feature size for spectrogram.
+nmel: 128                             # number of mel bins for the thing
+output_channels: [16, 32, 64, 128]    # Number of output channels for the autoencoder
+kernel_size: [7, 7, 5, 3, 3]          # Kernel size for the convolutional layers
+stride: [1, 2, 2, 2, 1]               # Stride for the convolutional layers
+output_features: [512, 64, 16, 4]     # Down/upscaling factors for each resnet blocks
+gradient_checkpointing : True         # Whether to use gradient checkpointing
+
+################ Discriminator Configuration ##############
+disc_start: 2048                      # Start training discriminator after this many steps. Set to a very small number for testing
+disc_loss: "mse"                      # Type of discriminator loss: "bce", "mse", "hinge"
+disc_spec_weight: 3                   # Weight of spectrogram loss in discriminator
+nfilters: 1024                        # Number of filters in the audio discriminators
+naudio_disc_layers: 4                 # Number of layers in each audio discriminaotrs
+audio_disc_downsampling_factor: 4     # Down sampling factor between each audio discriminator
+nspec_disc_patches: 4                 # Number of time patches to operate with in the spectrogrm disciminaotr
+
+################ Training Configuration ##############
+seed : 1943                           # Random seed
+val_count: 100                        # Number of validation samples
+disc_audio_weights: [1, 1, 1, 1]      # Weights for each audio discriminator
+disc_g_loss_audio_weight: 0.5         # Weight of the generator loss wrt reconstruction loss
+disc_g_loss_spec_weight: 0.5          # Weight of the generator loss wrt reconstruction loss
+perceptual_weight: 1                  # Weight for the perceptual loss
+steps: 100000                         # Number of training steps to perform in total
+warmup_steps: 500                     # Number of warmup steps for the learning rate scheduler
+autoencoder_lr: 0.00001               # Learning rate for the autoencoder
+autoencoder_acc_steps: 16             # Number of accumulation steps for the autoencoder
+save_steps: 2048                      # Number of steps between saving images
+ckpt_name: 'vocoder.pth'              # Checkpoint name for the vocoder
+run_name: "comp5421-training"         # Name of the training run
+val_steps: 512                        # Number of steps between validations
+validate_at_step_1: True              # Whether to validate at step 1, mostly for testing purposes but could make the logs nicer

@@ -1,0 +1,3 @@
+[submodule "AutoMasher"]
+	path = AutoMasher
+	url = https://github.com/darinchau/AutoMasher
