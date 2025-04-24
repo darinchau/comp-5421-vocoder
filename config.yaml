@@ -5,23 +5,22 @@ dataset_dirs: [
   "./fma_small_mp3"
 ]                                     # List of directories containing the audio dataset
 output_dir: "E:/output"               # Directory to save the trained models and checkpoints
-num_workers_dl: 2                     # Number of workers for data loading
+num_workers_dl: 0                     # Number of workers for data loading
 batch_size: 1                         # Batch size for autoencoder training
-ds_batch_size: 3                      # Batch size for dataset loading
+ds_batch_size: 16                     # Batch size for dataset loading
 
 ############### Model Configuration ##############
 sample_rate: 44100                    # Sample rate of the audio
 ntimeframes: 432                      # Number of time frames in the spectrogram
 nfft: 1025                            # feature size for spectrogram.
 nmel: 128                             # number of mel bins for the thing
-output_channels: [16, 32, 64, 128]    # Number of output channels for the autoencoder
-kernel_size: [7, 7, 5, 3, 3]          # Kernel size for the convolutional layers
-stride: [1, 2, 2, 2, 1]               # Stride for the convolutional layers
-output_features: [512, 64, 16, 4]     # Down/upscaling factors for each resnet blocks
+output_channels: [16, 32, 64]         # Number of output channels for the autoencoder
+kernel_size: [7, 5, 3, 3]             # Kernel size for the convolutional layers
+output_features: [513, 65, 17]        # Down/upscaling factors for each resnet blocks
 gradient_checkpointing : True         # Whether to use gradient checkpointing
 
 ################ Discriminator Configuration ##############
-disc_start: 2048                      # Start training discriminator after this many steps. Set to a very small number for testing
+disc_start: 2                      # Start training discriminator after this many steps. Set to a very small number for testing
 disc_loss: "mse"                      # Type of discriminator loss: "bce", "mse", "hinge"
 disc_spec_weight: 3                   # Weight of spectrogram loss in discriminator
 nfilters: 1024                        # Number of filters in the audio discriminators

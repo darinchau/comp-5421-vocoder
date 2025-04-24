@@ -22,11 +22,11 @@ from accelerate import Accelerator
 from math import isclose
 
 from AutoMasher.fyp import Audio
-from .config import TrainingConfig, STFT, make_stft
-from .model import (
+from config import TrainingConfig, STFT, make_stft
+from model import (
     Vocoder,
-    MultiResolutionDiscriminator as Discriminator,
-    MultiResolutionDiscriminatorOutput as DiscriminatorOutput,
+    Discriminator,
+    DiscriminatorOutput,
     Vggish
 )
 
@@ -64,17 +64,23 @@ class COMP5421Dataset(torch.utils.data.Dataset):
     def __getitem__(self, idx: int):
         path = self._files[idx]
         # If it is an wav file on a separate disk, read only the slice to save disk i/o
+        audios: list[Audio]
         if is_external_drive(path) and path.endswith(".wav"):
-            audio = read_random_audio_slice(path, self.config.audio_length, self.config.sample_rate)
+            audios = read_random_audio_slice(path, self.config.audio_length, self.config.sample_rate, self.config.ds_batch_size)
         else:
+            audios = []
             audio = Audio.load(path).resample(self.config.sample_rate)
-            slice_start = np.random.randint(0, audio.nframes - self.config.audio_length)
-            audio = audio.slice_frames(slice_start, slice_start + self.config.audio_length)
-        if audio.nchannels.value != 1:
-            audio = audio.to_nchannels(1)
-        _assert(audio.sample_rate == self.config.sample_rate, f"Audio sample rate {audio.sample_rate} does not match config sample rate {self.config.sample_rate}.")
-        _assert(audio.nframes == self.config.audio_length, f"Audio length {audio.nframes} does not match config audio length {self.config.audio_length}.")
-        return audio._data.float()
+            if audio.nframes - self.config.audio_length <= 0:
+                return self.__getitem__(np.random.randint(0, len(self._files)))
+            for i in range(self.config.ds_batch_size):
+                slice_start = np.random.randint(0, audio.nframes - self.config.audio_length)
+                aud = audio.slice_frames(slice_start, slice_start + self.config.audio_length)
+                audios.append(aud)
+        audios = [x.to_nchannels(1) for x in audios]
+        for audio in audios:
+            _assert(audio.sample_rate == self.config.sample_rate, f"Audio sample rate {audio.sample_rate} does not match config sample rate {self.config.sample_rate}.")
+            _assert(audio.nframes == self.config.audio_length, f"Audio length {audio.nframes} does not match config audio length {self.config.audio_length}.")
+        return torch.stack([x._data[0].float() for x in audios])
 
 
 class DiscriminatorLoss(nn.Module):
@@ -183,7 +189,7 @@ def is_external_drive(path: str) -> bool:
     if not os.path.exists(path):
         return False  # Path does not exist
     if os.name == 'nt':
-        return os.path.splitdrive(path)[0] == "C:"
+        return os.path.splitdrive(path)[0] != "C:"
     partitions = psutil.disk_partitions()
     path_mount_point = None
 
@@ -293,7 +299,7 @@ def make_split(config: TrainingConfig) -> tuple[list[str], list[str], list[str]]
     return train_split, val_split, test_split
 
 
-def read_random_audio_slice(file_path: str, slice_length: int, target_sr: int) -> Audio:
+def read_random_audio_slice(file_path: str, slice_length: int, target_sr: int, naudios: int) -> list[Audio]:
     """
     Reads a random slice of an audio file with the specified length at the target sample rate.
 
@@ -301,31 +307,36 @@ def read_random_audio_slice(file_path: str, slice_length: int, target_sr: int) -
     file_path (str): Path to the audio file.
     slice_length (int): Length of the audio slice in samples.
     target_sr (int): Target sample rate for the audio slice.
+    naudios (int): How many different slices to read
 
     Returns:
     audio: Audio object containing the audio data and sample rate with exactly the requested number of samples.
     """
-    with sf.SoundFile(file_path) as sf_file:
-        total_samples = len(sf_file)
-        if slice_length > total_samples:
-            raise ValueError("Slice length is greater than total number of samples in the file.")
-        start_sample = np.random.randint(0, total_samples - slice_length)
-        sf_file.seek(start_sample)
-        sample_rate = sf_file.samplerate
-        required_samples = int(slice_length * (target_sr / sample_rate)) + 1
-        data = sf_file.read(frames=slice_length, dtype='float32')
+    slices = []
+    for i in range(naudios):
+        with sf.SoundFile(file_path) as sf_file:
+            total_samples = len(sf_file)
+            if slice_length > total_samples:
+                raise ValueError("Slice length is greater than total number of samples in the file.")
+            start_sample = np.random.randint(0, total_samples - slice_length)
+            sf_file.seek(start_sample)
+            sample_rate = sf_file.samplerate
+            # Intentionally read a little bit more so that resampled audio sounds hopefully less weird
+            required_samples = int(slice_length * (sample_rate / target_sr)) + WAV_READ_BUFFER
+            data = sf_file.read(frames=required_samples, dtype='float32')
 
-    num_channels = sf_file.channels
-    tensor_data = torch.tensor(data)
-    if num_channels == 1:
-        tensor_data = tensor_data.unsqueeze(0)
-    else:
-        tensor_data = tensor_data.transpose(0, 1)
+        num_channels = sf_file.channels
+        tensor_data = torch.tensor(data)
+        if num_channels == 1:
+            tensor_data = tensor_data.unsqueeze(0)
+        else:
+            tensor_data = tensor_data.transpose(0, 1)
 
-    audio = Audio(tensor_data, sample_rate)
-    _assert(slice_length <= audio.nframes <= slice_length + 1, f"Slice length {slice_length} is not equal to audio length {audio.nframes}.")
-    audio = audio.slice_frames(0, slice_length)
-    return audio
+        audio = Audio(tensor_data, sample_rate)
+        audio = audio.resample(target_sr)
+        audio = audio.slice_frames(0, slice_length)
+        slices.append(audio)
+    return slices
 
 
 def make_model(config: TrainingConfig) -> Vocoder:
@@ -334,10 +345,10 @@ def make_model(config: TrainingConfig) -> Vocoder:
         make_stft(config.audio_length, feat) for feat in config.output_features
     ]
     model = Vocoder(
+        config,
         stfts,
         list(config.output_channels),
         kernel_size=list(config.kernel_size),
-        stride=list(config.stride),
         audio_length=config.audio_length,
     )
     return model
@@ -366,6 +377,7 @@ def validate(
             if val_count_ > config.val_count:
                 break
 
+            target_audio = target_audio.flatten(0, 1)
             assert isinstance(target_audio, torch.Tensor)
             _assert(target_audio.dim() == 2)                                    # im shape: B, L
             _assert(target_audio.shape[1] == config.audio_length)               # im shape: B, L
@@ -430,7 +442,7 @@ def train(config_path: str, start_from_iter: int = 0):
     val_dataset = COMP5421Dataset(config, val_paths)
     print('Train dataset size: {}'.format(len(train_dataset)))
 
-    print('Dataset size: {}'.format(len(val_dataset)))
+    print('Val dataset size: {}'.format(len(val_dataset)))
 
     print(f"Effective audio length: {config.audio_length / config.sample_rate} seconds")
 
@@ -494,7 +506,7 @@ def train(config_path: str, start_from_iter: int = 0):
     wandb.init(
         # set the wandb project where this run will be logged
         project=config.run_name,
-        config=config.asdict()
+        config=config.asdict(),
     )
 
     model.train()
@@ -511,9 +523,11 @@ def train(config_path: str, start_from_iter: int = 0):
                 stop_training = True
                 break
 
+            target_audio = target_audio.flatten(0, 1)
+
             assert isinstance(target_audio, torch.Tensor)
-            _assert(target_audio.dim() == 2)                                    # im shape: B, L
-            _assert(target_audio.shape[1] == config.audio_length)               # im shape: B, L
+            _assert(target_audio.dim() == 2, f"Got wrong shape: {target_audio.shape}")  # im shape: B, L
+            _assert(target_audio.shape[1] == config.audio_length, f"Got wrong shape: {target_audio.shape}")
 
             batch_size = target_audio.shape[0]
             target_audio = target_audio.float().to(device)
@@ -525,7 +539,7 @@ def train(config_path: str, start_from_iter: int = 0):
             with autocast('cuda'):
                 pred_audio: torch.Tensor = model(target_spec)
 
-            _assert(pred_audio.shape == target_audio.shape)
+            _assert(pred_audio.shape == target_audio.shape, f"Got wrong shape: {pred_audio.shape} vs {target_audio.shape}")
 
             pred_spec = stft.mel(
                 pred_audio.float(), config.sample_rate, config.nmel
@@ -542,13 +556,13 @@ def train(config_path: str, start_from_iter: int = 0):
             # Adversarial loss only if disc_step_start steps passed
             if step_count > config.disc_start:
                 with autocast('cuda'):
-                    dgz = discriminator(pred_audio, pred_spec.unsqueeze(1))
+                    dgz = discriminator(pred_audio, pred_spec)
                     disc_fake_loss_aud, disc_fake_loss_spec = disc_loss(dgz)
                 losses["Generator Audio Loss"] = disc_fake_loss_aud
                 losses["Generator Spectrogram Loss"] = disc_fake_loss_spec
             else:
-                losses["Generator Audio Loss"] = 0
-                losses["Generator Spectrogram Loss"] = 0
+                losses["Generator Audio Loss"] = torch.tensor(0.).to(device)
+                losses["Generator Spectrogram Loss"] = torch.tensor(0.).to(device)
 
             # Perceptual Loss
             losses["Perceptual Loss"] = torch.mean(perceptual_loss(pred_audio, target_audio))
@@ -581,8 +595,8 @@ def train(config_path: str, start_from_iter: int = 0):
                     optimizer_d.zero_grad()
                 discriminator.eval()
             else:
-                losses["Discriminator Audio Loss"] = 0
-                losses["Discriminator Spectrogram Loss"] = 0
+                losses["Discriminator Audio Loss"] = torch.tensor(0.).to(device)
+                losses["Discriminator Spectrogram Loss"] = torch.tensor(0.).to(device)
             #####################################
 
             if step_count % config.autoencoder_acc_steps == 0:

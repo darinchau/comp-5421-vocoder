@@ -22,8 +22,7 @@ class TrainingConfig:
     nfft: int = 1025
     nmel: int = 128
     output_channels: tuple[int, ...] = (512, 128, 64, 8)
-    kernel_size: tuple[int, ...] = (9, 7, 5, 3)
-    stride: tuple[int, ...] = (4, 4, 4, 4)
+    kernel_size: tuple[int, ...] = (7, 7, 5, 3, 3)
     output_features: tuple[int, ...] = (512, 128, 64, 8)
     gradient_checkpointing: bool = True
 
@@ -192,6 +191,23 @@ class STFT:
         self._assert_is_audio(x, bs=z.shape[0])
         return x
 
+    def griffin_lim(self, z: torch.Tensor, n_iter: int = 32) -> torch.Tensor:
+        # TODO: test this function
+        self._assert_is_mel(z)  # mel spectrograms checks for real-valued specs
+        if not self._skip_checks:
+            assert z.shape[1] == self.n
+
+        # We expect no trimming or padding to be done, so length=None
+        x = torchaudio.transforms.GriffinLim(
+            n_fft=self.n_fft,
+            n_iter=n_iter,
+            power=2,
+            length=self.l
+        ).to(z.device)(z)
+
+        self._assert_is_audio(x, bs=z.shape[0])
+        return x
+
     def mel(self, x: torch.Tensor, sample_rate: int, nmels: int = 80) -> torch.Tensor:
         self._assert_is_audio(x)
 
@@ -205,7 +221,7 @@ class STFT:
             center=True,
             pad_mode='reflect',
             power=2.0,
-        )(x)
+        ).to(x.device)(x)
 
         self._assert_is_mel(mel, bs=x.shape[0])
         return mel
