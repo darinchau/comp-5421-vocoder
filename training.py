@@ -66,11 +66,16 @@ class COMP5421Dataset(torch.utils.data.Dataset):
         # If it is an wav file on a separate disk, read only the slice to save disk i/o
         audios: list[Audio]
         if is_external_drive(path) and path.endswith(".wav"):
-            audios = read_random_audio_slice(path, self.config.audio_length, self.config.sample_rate, self.config.ds_batch_size)
+            try:
+                audios = read_random_audio_slice(path, self.config.audio_length, self.config.sample_rate, self.config.ds_batch_size)
+            except Exception as e:
+                tqdm.write(f"Error reading {path}: {e}")
+                return self.__getitem__(np.random.randint(0, len(self._files)))
         else:
             audios = []
             audio = Audio.load(path).resample(self.config.sample_rate)
             if audio.nframes - self.config.audio_length <= 0:
+                tqdm.write(f"Audio {path} is too short: {audio.nframes} frames")
                 return self.__getitem__(np.random.randint(0, len(self._files)))
             for i in range(self.config.ds_batch_size):
                 slice_start = np.random.randint(0, audio.nframes - self.config.audio_length)
@@ -91,23 +96,14 @@ class DiscriminatorLoss(nn.Module):
     def compute_bce_loss(self, dgz: DiscriminatorOutput, dx: DiscriminatorOutput | None = None):
         generator = dx is None
         if generator:
-            loss = self.config.disc_spec_weight * F.binary_cross_entropy_with_logits(
-                dgz.spectrogram_results, torch.ones_like(dgz.spectrogram_results)
-            )
-            loss_audio = torch.zeros_like(loss)
+            loss_audio = torch.tensor(0.0).to(device)
             for i in range(self.config.num_audio_discriminators):
                 loss_audio += self.config.disc_audio_weights[i] * F.binary_cross_entropy_with_logits(
                     dgz.audio_results[i], torch.ones_like(dgz.audio_results[i])
                 )
         else:
-            fake_loss = self.config.disc_spec_weight * F.binary_cross_entropy_with_logits(
-                dgz.spectrogram_results, torch.zeros_like(dgz.spectrogram_results)
-            )
-            real_loss = self.config.disc_spec_weight * F.binary_cross_entropy_with_logits(
-                dx.spectrogram_results, torch.ones_like(dx.spectrogram_results)
-            )
-            fake_loss_audio = torch.zeros_like(fake_loss)
-            real_loss_audio = torch.zeros_like(real_loss)
+            fake_loss_audio = torch.tensor(0.0).to(device)
+            real_loss_audio = torch.tensor(0.0).to(device)
             for i in range(self.config.num_audio_discriminators):
                 fake_loss_audio += self.config.disc_audio_weights[i] * F.binary_cross_entropy_with_logits(
                     dgz.audio_results[i], torch.zeros_like(dgz.audio_results[i])
@@ -115,30 +111,20 @@ class DiscriminatorLoss(nn.Module):
                 real_loss_audio += self.config.disc_audio_weights[i] * F.binary_cross_entropy_with_logits(
                     dx.audio_results[i], torch.ones_like(dx.audio_results[i])
                 )
-            loss = (fake_loss + real_loss) / 2.0
             loss_audio = (fake_loss_audio + real_loss_audio) / 2.0
-        return loss, loss_audio
+        return loss_audio
 
     def compute_mse_loss(self, dgz: DiscriminatorOutput, dx: DiscriminatorOutput | None = None):
         generator = dx is None
         if generator:
-            loss = self.config.disc_spec_weight * F.mse_loss(
-                dgz.spectrogram_results, torch.ones_like(dgz.spectrogram_results)
-            )
-            loss_audio = torch.zeros_like(loss)
+            loss_audio = torch.tensor(0.0).to(device)
             for i in range(self.config.num_audio_discriminators):
                 loss_audio += self.config.disc_audio_weights[i] * F.mse_loss(
                     dgz.audio_results[i], torch.ones_like(dgz.audio_results[i])
                 )
         else:
-            fake_loss = self.config.disc_spec_weight * F.mse_loss(
-                dgz.spectrogram_results, torch.zeros_like(dgz.spectrogram_results)
-            )
-            real_loss = self.config.disc_spec_weight * F.mse_loss(
-                dx.spectrogram_results, torch.ones_like(dx.spectrogram_results)
-            )
-            fake_loss_audio = torch.zeros_like(fake_loss)
-            real_loss_audio = torch.zeros_like(real_loss)
+            fake_loss_audio = torch.tensor(0.0).to(device)
+            real_loss_audio = torch.tensor(0.0).to(device)
             for i in range(self.config.num_audio_discriminators):
                 fake_loss_audio += self.config.disc_audio_weights[i] * F.mse_loss(
                     dgz.audio_results[i], torch.zeros_like(dgz.audio_results[i])
@@ -146,41 +132,36 @@ class DiscriminatorLoss(nn.Module):
                 real_loss_audio += self.config.disc_audio_weights[i] * F.mse_loss(
                     dx.audio_results[i], torch.ones_like(dx.audio_results[i])
                 )
-            loss = (fake_loss + real_loss) / 2.0
             loss_audio = (fake_loss_audio + real_loss_audio) / 2.0
-        return loss, loss_audio
+        return loss_audio
 
     def compute_hinge_loss(self, dgz: DiscriminatorOutput, dx: DiscriminatorOutput | None = None):
         generator = dx is None
         if generator:
-            loss = self.config.disc_spec_weight * F.relu(1 - dgz.spectrogram_results).mean()
-            loss_audio = torch.zeros_like(loss)
+            loss_audio = torch.tensor(0.0).to(device)
             for i in range(self.config.num_audio_discriminators):
                 loss_audio += self.config.disc_audio_weights[i] * F.relu(1 - dgz.audio_results[i]).mean()
         else:
-            fake_loss = self.config.disc_spec_weight * F.relu(1 + dgz.spectrogram_results).mean()
-            real_loss = self.config.disc_spec_weight * F.relu(1 - dx.spectrogram_results).mean()
-            fake_loss_audio = torch.zeros_like(fake_loss)
-            real_loss_audio = torch.zeros_like(real_loss)
+            fake_loss_audio = torch.tensor(0.0).to(device)
+            real_loss_audio = torch.tensor(0.0).to(device)
             for i in range(self.config.num_audio_discriminators):
                 fake_loss_audio += self.config.disc_audio_weights[i] * F.relu(1 + dgz.audio_results[i]).mean()
                 real_loss_audio += self.config.disc_audio_weights[i] * F.relu(1 - dx.audio_results[i]).mean()
-            loss = (fake_loss + real_loss) / 2.0
             loss_audio = (fake_loss_audio + real_loss_audio) / 2.0
-        return loss, loss_audio
+        return loss_audio
 
     def forward(self, dgz: DiscriminatorOutput, dx: DiscriminatorOutput | None = None):
-        loss = loss_audio = None
+        loss = None
         if self.config.disc_loss == "bce":
-            loss, loss_audio = self.compute_bce_loss(dgz, dx)
+            loss = self.compute_bce_loss(dgz, dx)
         elif self.config.disc_loss == "mse":
-            loss, loss_audio = self.compute_mse_loss(dgz, dx)
+            loss = self.compute_mse_loss(dgz, dx)
         elif self.config.disc_loss == "hinge":
-            loss, loss_audio = self.compute_hinge_loss(dgz, dx)
+            loss = self.compute_hinge_loss(dgz, dx)
         else:
             raise ValueError(f"Unsupported discriminator loss type: {self.config.disc_loss}")
-        loss_audio = loss_audio / self.config.num_audio_discriminators
-        return loss, loss_audio
+        loss = loss / self.config.num_audio_discriminators
+        return loss
 
 
 def is_external_drive(path: str) -> bool:
@@ -354,6 +335,44 @@ def make_model(config: TrainingConfig) -> Vocoder:
     return model
 
 
+def infer(target_audio: Tensor, config: TrainingConfig, model: Vocoder, stft: STFT):
+    target_audio = target_audio.flatten(0, 1)
+
+    assert isinstance(target_audio, torch.Tensor)
+    _assert(target_audio.dim() == 2, f"Got wrong shape: {target_audio.shape}")  # im shape: B, L
+    _assert(target_audio.shape[1] == config.audio_length, f"Got wrong shape: {target_audio.shape}")
+
+    batch_size = target_audio.shape[0]
+    target_audio = target_audio.float().to(device)
+    target_spec = stft.mel(
+        target_audio.float(), config.sample_rate, config.nmel
+    )
+    mean = target_spec.mean(dim=(1, 2), keepdim=True)
+    std = target_spec.std(dim=(1, 2), keepdim=True)
+    x = (target_spec - mean) / (std + 1e-5)
+
+    # Fetch autoencoders output(reconstructions)
+    with autocast('cuda'):
+        pred_audio: torch.Tensor = model(x.detach())
+
+    _assert(pred_audio.shape == target_audio.shape, f"Got wrong shape: {pred_audio.shape} vs {target_audio.shape}")
+
+    pred_spec = stft.mel(
+        pred_audio.float(), config.sample_rate, config.nmel
+    )
+
+    # If any one of the four things is nan, print all the model parameters and see which one is nan
+    if torch.isnan(pred_audio).any() or torch.isnan(pred_spec).any():
+        for name, param in model.named_parameters():
+            if param.grad is not None and torch.isnan(param.grad).any():
+                print(f"Parameter {name} has NaN gradients")
+            if torch.isnan(param).any():
+                print(f"Parameter {name} has NaN values")
+        raise ValueError("NaN found in predictions")
+
+    return pred_audio, target_audio, pred_spec, target_spec
+
+
 def validate(
     config: TrainingConfig,
     model: Vocoder,
@@ -377,25 +396,8 @@ def validate(
             if val_count_ > config.val_count:
                 break
 
-            target_audio = target_audio.flatten(0, 1)
-            assert isinstance(target_audio, torch.Tensor)
-            _assert(target_audio.dim() == 2)                                    # im shape: B, L
-            _assert(target_audio.shape[1] == config.audio_length)               # im shape: B, L
-
-            batch_size = target_audio.shape[0]
-            target_audio = target_audio.float().to(device)
-            target_spec = stft.mel(
-                target_audio.float(), config.sample_rate, config.nmel
-            )                                                                   # shape: B, nmel, T
-
-            # Fetch autoencoders output(reconstructions)
-            with autocast('cuda'):
-                pred_audio: torch.Tensor = model(target_spec)
-
-            _assert(pred_audio.shape == target_audio.shape)
-
-            pred_spec = stft.mel(
-                pred_audio.float(), config.sample_rate, config.nmel
+            pred_audio, target_audio, pred_spec, target_spec = infer(
+                target_audio, config, model, stft
             )
 
             #######################################
@@ -523,56 +525,32 @@ def train(config_path: str, start_from_iter: int = 0):
                 stop_training = True
                 break
 
-            target_audio = target_audio.flatten(0, 1)
-
-            assert isinstance(target_audio, torch.Tensor)
-            _assert(target_audio.dim() == 2, f"Got wrong shape: {target_audio.shape}")  # im shape: B, L
-            _assert(target_audio.shape[1] == config.audio_length, f"Got wrong shape: {target_audio.shape}")
-
-            batch_size = target_audio.shape[0]
-            target_audio = target_audio.float().to(device)
-            target_spec = stft.mel(
-                target_audio.float(), config.sample_rate, config.nmel
-            )                                                                   # shape: B, nmel, T
-
-            # Fetch autoencoders output(reconstructions)
-            with autocast('cuda'):
-                pred_audio: torch.Tensor = model(target_spec)
-
-            _assert(pred_audio.shape == target_audio.shape, f"Got wrong shape: {pred_audio.shape} vs {target_audio.shape}")
-
-            pred_spec = stft.mel(
-                pred_audio.float(), config.sample_rate, config.nmel
+            pred_audio, target_audio, pred_spec, target_spec = infer(
+                target_audio, config, model, stft
             )
-
             losses = {}
 
             ######### Optimize Generator ##########
             # L2 Loss
             with autocast("cuda"):
                 losses["Audio Reconstruction Loss"] = reconstruction_loss(pred_audio, target_audio)
-                losses["Spectrogram Reconstruction Loss"] = reconstruction_loss(pred_spec, target_spec)
 
             # Adversarial loss only if disc_step_start steps passed
             if step_count > config.disc_start:
                 with autocast('cuda'):
                     dgz = discriminator(pred_audio, pred_spec)
-                    disc_fake_loss_aud, disc_fake_loss_spec = disc_loss(dgz)
-                losses["Generator Audio Loss"] = disc_fake_loss_aud
-                losses["Generator Spectrogram Loss"] = disc_fake_loss_spec
+                    disc_fake_loss = disc_loss(dgz)
+                losses["Generator Audio Loss"] = disc_fake_loss
             else:
                 losses["Generator Audio Loss"] = torch.tensor(0.).to(device)
-                losses["Generator Spectrogram Loss"] = torch.tensor(0.).to(device)
 
             # Perceptual Loss
             losses["Perceptual Loss"] = torch.mean(perceptual_loss(pred_audio, target_audio))
 
             g_loss = (
                 losses["Audio Reconstruction Loss"] +
-                losses["Spectrogram Reconstruction Loss"] +
                 losses["Perceptual Loss"] * config.perceptual_weight +
-                losses["Generator Audio Loss"] * config.disc_g_loss_audio_weight +
-                losses["Generator Spectrogram Loss"] * config.disc_g_loss_spec_weight
+                losses["Generator Audio Loss"] * config.disc_g_loss_audio_weight
             ) / config.autoencoder_acc_steps
 
             accelerator.backward(g_loss)
@@ -584,13 +562,12 @@ def train(config_path: str, start_from_iter: int = 0):
                 with autocast('cuda'):
                     dgz = discriminator(pred_audio.detach(), pred_spec.detach())
                     dx = discriminator(target_audio, target_spec)
-                disc_fake_loss_aud, disc_fake_loss_spec = disc_loss(dgz, dx)
-                losses["Discriminator Audio Loss"] = disc_fake_loss_aud
-                losses["Discriminator Spectrogram Loss"] = disc_fake_loss_spec
-                disc_fake_loss = disc_fake_loss_aud + disc_fake_loss_spec
+                disc_fake_loss = disc_loss(dgz, dx)
+                losses["Discriminator Loss"] = disc_fake_loss
                 disc_fake_loss /= config.autoencoder_acc_steps
                 accelerator.backward(disc_fake_loss)
                 if step_count % config.autoencoder_acc_steps == 0:
+                    torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=1.0)  # Clip gradients
                     optimizer_d.step()
                     optimizer_d.zero_grad()
                 discriminator.eval()
@@ -599,12 +576,19 @@ def train(config_path: str, start_from_iter: int = 0):
                 losses["Discriminator Spectrogram Loss"] = torch.tensor(0.).to(device)
             #####################################
 
+            # Check the magnitude of the gradients
+            # for name, param in model.named_parameters():
+            #     if param.grad is not None:
+            #         grad_norm = torch.norm(param.grad).item()
+            #         wandb.log({f"Gradient Norm/{name}": grad_norm}, step=step_count)
+
             if step_count % config.autoencoder_acc_steps == 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Clip gradients
                 optimizer_g.step()
                 optimizer_g.zero_grad()
 
             # Log losses
-            wandb.log({k: v.item() for k, v in losses.items()} | {
+            wandb.log({k: v.detach().item() for k, v in losses.items()} | {
                 "Discriminator Learning Rate": optimizer_g.param_groups[0]['lr'],
                 "Generator Learning Rate": optimizer_d.param_groups[0]['lr'],
             }, step=step_count)

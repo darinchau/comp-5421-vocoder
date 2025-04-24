@@ -27,16 +27,13 @@ class TrainingConfig:
     gradient_checkpointing: bool = True
 
     disc_start: int = 2048
-    disc_spec_weight: float = 3
     nfilters: int = 1024
     naudio_disc_layers: int = 4
     audio_disc_downsampling_factor: int = 4
-    nspec_disc_patches: int = 4
 
     seed: int = 1943
     val_count: int = 100
     disc_audio_weights: tuple[float, ...] = (1, 1, 1, 1)
-    disc_g_loss_spec_weight: float = 0.25
     disc_g_loss_audio_weight: float = 0.25
     perceptual_weight: int = 1
     steps: int = 100000
@@ -85,7 +82,6 @@ class TrainingConfig:
 
     def __post_init__(self):
         assert self.disc_loss in ("bce", "mse", "hinge")
-        assert self.nspec_disc_patches > 0
 
     def get_vocoder_save_path(self, step: int) -> str:
         path = os.path.join(self.output_dir, self.run_name, f"step-{step:06d}", self.ckpt_name)

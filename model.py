@@ -37,8 +37,6 @@ class LearnableAdaptivePooling2d(nn.Module):
         # TODO use a real learnable pooling layer? Idk if this helps lol
         self.conv = nn.Conv2d(channels, channels, kernel_size=(1, 1), stride=(1, 1), padding=(0, 0), bias=True)
         assert self.conv.bias is not None  # To appease the typechecker
-        nn.init.dirac_(self.conv.weight)
-        self.conv.bias.data.fill_(0.0)
         self.conv.weight.requires_grad = True
         self.conv.bias.requires_grad = True
 
@@ -65,7 +63,7 @@ class LearnableAdaptiveResnetBlock(nn.Module):
         padding = kernel_size // 2
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, stride=1, padding=padding)
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=kernel_size, stride=1, padding=padding)
-        self.lrelu = nn.LeakyReLU(0.2, inplace=True)
+        self.lrelu = nn.LeakyReLU(0.2)
         self.projection = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0, bias=False)
         nn.init.dirac_(self.projection.weight)
 
@@ -98,10 +96,12 @@ class Vocoder(nn.Module):
         assert len(stfts) == len(output_channels) == len(kernel_size) - 1, "All input lists must have the same length."
         resnet_blocks = []
         output_convs = []
+        batch_norms = []
         in_channels = 1
         in_size_x = config.nmel
         in_size_y = config.ntimeframes
         for i in range(len(output_channels)):
+            batch_norms.append(nn.BatchNorm2d(in_channels))
             out_channels = output_channels[i]
             out_size_x = self.stfts[i].n
             out_size_y = self.stfts[i].t
@@ -118,6 +118,7 @@ class Vocoder(nn.Module):
             in_size_x = out_size_x
             in_size_y = out_size_y
             output_convs.append(nn.Conv2d(out_channels, 2, kernel_size=1))
+        self.batch_norms = nn.ModuleList(batch_norms)
         self.resnet_blocks = nn.ModuleList(resnet_blocks)
         self.output_convs = nn.ModuleList(output_convs)
         self.final_block = LearnableAdaptiveResnetBlock(
@@ -134,23 +135,25 @@ class Vocoder(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x shape: (B, nfft, ntimeframes)
         assert len(x.shape) == 3, f"Expected 3D tensor, got {x.shape}"
-        x = x.unsqueeze(1)                    # Add channel dimension: (B, 1, nfft, ntimeframes)
-        y: torch.Tensor = None                # type: ignore[assignment]
+        x = x.unsqueeze(1)                          # Add channel dimension: (B, 1, nfft, ntimeframes)
+        y: torch.Tensor = None                      # type: ignore[assignment]
         for i, block in enumerate(self.resnet_blocks):
-            x = block(x)                      # (B, out_channels, nfft, ntimeframes)
-            out = self.output_convs[i](x)     # (B, 2, nfft, ntimeframes)
-            out = out.permute(0, 2, 3, 1)     # (B, nfft, ntimeframes, 2)
-            out = out.float()                 # (B, nfft, ntimeframes, 2)
+            x = self.batch_norms[i](x)              # (B, in_channels, in_x, in_y)
+            x = block(x)                            # (B, out_channels, nfft, ntimeframes)
+            out = self.output_convs[i](x)           # (B, 2, nfft, ntimeframes)
+            spec = torch.exp(out[:, 0, :, :])       # (B, nfft, ntimeframes)
+            phase = torch.sin(out[:, 1, :, :])
+            out = torch.polar(spec.float(), phase.float())
             out = self.stfts[i].inverse(
                 out.contiguous()
-            )                                 # (B, L)
+            )                                   # (B, L)
             if y is None:
                 y = out
             else:
                 y += out
-        x = self.final_block(x)               # (B, 1, 4, L//4)
-        x = x.flatten(2, 3).squeeze(1)        # (B, L)
-        return F.tanh(x + y)                  # (B, L), fix between [-1, 1] - TODO see if this is necessary
+        x = self.final_block(x)                 # (B, 1, 4, L//4)
+        x = x.flatten(2, 3).squeeze(1)          # (B, L)
+        return (x + y) / (len(self.stfts) + 1)  # (B, L)
 
 
 class Vggish(nn.Module):
@@ -195,7 +198,7 @@ class NLayerDiscriminator(nn.Module):
         model.append(nn.Sequential(
             nn.ReflectionPad1d(7),
             WNConv1d(nsources, ndf, kernel_size=15),
-            nn.LeakyReLU(0.2, True),
+            nn.LeakyReLU(0.2),
         ))
 
         nf = ndf
@@ -214,13 +217,13 @@ class NLayerDiscriminator(nn.Module):
                     padding=stride * 5,
                     groups=nf_prev // 4,
                 ),
-                nn.LeakyReLU(0.2, True),
+                nn.LeakyReLU(0.2),
             ))
 
         nf = min(nf * 2, 1024)
         model.append(nn.Sequential(
             WNConv1d(nf_prev, nf, kernel_size=5, stride=1, padding=2),
-            nn.LeakyReLU(0.2, True),
+            nn.LeakyReLU(0.2),
         ))
 
         model.append(WNConv1d(
@@ -256,60 +259,9 @@ class AudioDiscriminator(nn.Module):
         return results
 
 
-class SpectrogramPatchModel(nn.Module):
-    def __init__(self, nsources: int, nfft: int, ntimeframes: int, num_patches: int = 4):
-        super(SpectrogramPatchModel, self).__init__()
-        assert ntimeframes % num_patches == 0, "ntimeframes must be divisible by num_patches"
-
-        # Define a simple CNN architecture for each patch
-        self.conv1 = nn.Conv2d(nsources, 16, kernel_size=3, padding=1)
-        self.pool11 = nn.AdaptiveMaxPool2d((nfft // 2, ntimeframes // num_patches))
-        self.pool12 = nn.AdaptiveAvgPool2d((nfft // 2, ntimeframes // (num_patches * 2)))
-        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, padding=1)
-        self.pool21 = nn.AdaptiveMaxPool2d((nfft // 4, ntimeframes // (num_patches * 2)))
-        self.pool22 = nn.AdaptiveAvgPool2d((nfft // 4, ntimeframes // (num_patches * 4)))
-        self.conv3 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-        self.pool31 = nn.AdaptiveMaxPool2d((nfft // 8, ntimeframes // (num_patches * 4)))
-        self.pool32 = nn.AdaptiveAvgPool2d((nfft // 8, ntimeframes // (num_patches * 8)))
-        self.conv4 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
-        self.fc = nn.Conv2d(128, 1, (nfft // 8, ntimeframes // (num_patches * 8)))  # Equivalent to FC layers over each channel
-        self.nsources = nsources
-        self.nfft = nfft
-        self.ntimeframes = ntimeframes
-        self.num_patches = num_patches
-
-    def forward(self, x: torch.Tensor):
-        # x shape: (B, nsources, nfft, ntimeframes)
-        batch_size = x.size(0)
-        assert x.shape == (batch_size, self.nsources, self.nfft, self.ntimeframes), f"Input shape mismatch: {x.shape} vs {(batch_size, self.nsources, self.nfft, self.ntimeframes)}"
-        # Splitting along the T axis into 4 patches
-        x = x.unflatten(3, (self.num_patches, self.ntimeframes // self.num_patches)).permute(0, 3, 1, 2, 4)  # (B, npatch, nsources, nfft, ntimeframes // npatch)
-        x = x.flatten(0, 1).contiguous()
-
-        # Apply CNN
-        x = self.conv1(x)
-        x = F.relu(x)
-        x = self.pool11(x)
-        x = self.pool12(x)
-        x = self.conv2(x)
-        x = F.relu(x)
-        x = self.pool21(x)
-        x = self.pool22(x)
-        x = self.conv3(x)
-        x = F.relu(x)
-        x = self.pool31(x)
-        x = self.pool32(x)
-        x = self.conv4(x)
-        x = F.relu(x)
-        x = self.fc(x)
-        x = x.view(batch_size, self.num_patches, -1).squeeze(-1)
-        return x
-
-
 @dataclass
 class DiscriminatorOutput:
     audio_results: list[torch.Tensor]
-    spectrogram_results: torch.Tensor
 
 
 class Discriminator(nn.Module):
@@ -317,9 +269,6 @@ class Discriminator(nn.Module):
         super().__init__()
         self.audio_discriminator = AudioDiscriminator(
             1, len(config.disc_audio_weights), config.nfilters, config.naudio_disc_layers, config.audio_disc_downsampling_factor
-        )
-        self.spectrogram_discriminator = SpectrogramPatchModel(
-            1, config.nmel, config.ntimeframes, config.nspec_disc_patches
         )
         self.config = config
 
@@ -329,11 +278,9 @@ class Discriminator(nn.Module):
         audio = audio.unsqueeze(1)
         spectrogram = spectrogram.unsqueeze(1)
         audio_results = self.audio_discriminator(audio)
-        spectrogram_results = self.spectrogram_discriminator(spectrogram)
 
         return DiscriminatorOutput(
             audio_results=audio_results,
-            spectrogram_results=spectrogram_results,
         )
 
     def __call__(self, audio: torch.Tensor, spectrogram: torch.Tensor) -> DiscriminatorOutput:
