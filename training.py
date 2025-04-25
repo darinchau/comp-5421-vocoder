@@ -572,8 +572,7 @@ def train(config_path: str, start_from_iter: int = 0):
                     optimizer_d.zero_grad()
                 discriminator.eval()
             else:
-                losses["Discriminator Audio Loss"] = torch.tensor(0.).to(device)
-                losses["Discriminator Spectrogram Loss"] = torch.tensor(0.).to(device)
+                losses["Discriminator Loss"] = torch.tensor(0.).to(device)
             #####################################
 
             # Check the magnitude of the gradients
