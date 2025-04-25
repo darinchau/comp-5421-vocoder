@@ -73,7 +73,11 @@ class COMP5421Dataset(torch.utils.data.Dataset):
                 return self.__getitem__(np.random.randint(0, len(self._files)))
         else:
             audios = []
-            audio = Audio.load(path).resample(self.config.sample_rate)
+            try:
+                audio = Audio.load(path).resample(self.config.sample_rate)
+            except Exception as e:
+                tqdm.write(f"Error loading {path}: {e}")
+                return self.__getitem__(np.random.randint(0, len(self._files)))
             if audio.nframes - self.config.audio_length <= 0:
                 tqdm.write(f"Audio {path} is too short: {audio.nframes} frames")
                 return self.__getitem__(np.random.randint(0, len(self._files)))
